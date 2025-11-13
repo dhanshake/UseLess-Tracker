@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Expense Tracker</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useRef } = React;
+        const { Camera, Upload, Save, Plus, X } = lucide;
+
+        function ExpenseTracker() {
+            const [expenses, setExpenses] = useState([]);
+            const [formData, setFormData] = useState({
+                date: new Date().toISOString().split('T')[0],
+                category: '',
+                place: '',
+                items: '',
+                aud: '',
+                paymentMode: '',
+                comments: ''
+            });
+            const [categories, setCategories] = useState([
+                'Travel', 'DayOut', 'Recharge', 'Utilities', 'Rent', 'Hospital', 'Groceries', 'Non Veg'
+            ]);
+            const [paymentModes, setPaymentModes] = useState([
+                'DG-Amex', 'DG-CBA', 'G-Westpac'
+            ]);
+            const [isProcessing, setIsProcessing] = useState(false);
+            const [showAddCategory, setShowAddCategory] = useState(false);
+            const [showAddPayment, setShowAddPayment] = useState(false);
+            const [newCategory, setNewCategory] = useState('');
+            const [newPayment, setNewPayment] = useState('');
+            const [notification, setNotification] = useState('');
+            const videoRef = useRef(null);
+            const canvasRef = useRef(null);
+            const [isCameraActive, setIsCameraActive] = useState(false);
+            const [googleSheetURL, setGoogleSheetURL] = useState('');
+            const [showSettings, setShowSettings] = useState(false);
+
+            const handleInputChange = (e) => {
+                const { name, value } = e.target;
+                setFormData(prev => ({ ...prev, [name]: value }));
+            };
+
+            const showNotification = (message) => {
+                setNotification(message);
+                setTimeout(() => setNotification(''), 3000);
+            };
+
+            const processImage = async (imageData) => {
+                setIsProcessing(true);
+                try {
+                    const response = await fetch("https://api.anthropic.com/v1/messages", {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                        },
+                        body: JSON.stringify({
+                            model: "claude-sonnet-4-20250514",
+                            max_tokens: 1000,
+                            messages: [
+                                {
+                                    role: "user",
+                                    content: [
+                                        {
+                                            type: "image",
+                                            source: {
+                                                type: "base64",
+                                                media_type: "image/jpeg",
+                                                data: imageData
+                                            }
+                                        },
+                                        {
+                                            type: "text",
+                                            text: `Extract expense information from this receipt/image. Return ONLY a JSON object with these fields: date (YYYY-MM-DD format), category (one of: Travel, DayOut, Recharge, Utilities, Rent, Hospital, Groceries, Non Veg), place, items, aud (amount in AUD as number), comments. If you can't find a field, use empty string. For date, use today's date if not visible: ${new Date().toISOString().split('T')[0]}`
+                                        }
+                                    ]
+                                }
+                            ]
+                        })
+                    });
+
+                    const data = await response.json();
+                    const text = data.content.find(c => c.type === 'text')?.text || '';
+                    const jsonMatch = text.match(/\{[\s\S]*\}/);
+                    
+                    if (jsonMatch) {
+                        const extracted = JSON.parse(jsonMatch[0]);
+                        setFormData(prev => ({
+                            ...prev,
+                            date: extracted.date || prev.date,
+                            category: extracted.category || '',
+                            place: extracted.place || '',
+                            items: extracted.items || '',
+                            aud: extracted.aud?.toString() || '',
+                            comments: extracted.comments || ''
+                        }));
+                        showNotification('Receipt scanned successfully!');
+                    }
+                } catch (error) {
+                    console.error('Error processing image:', error);
+                    showNotification('Error processing image. Please try again.');
+                }
+                setIsProcessing(false);
+            };
+
+            const handleFileUpload = async (e) => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+
+                const reader = new FileReader();
+                reader.onload = async (event) => {
+                    const base64Data = event.target.result.split(',')[1];
+                    await processImage(base64Data);
+                };
+                reader.readAsDataURL(file);
+            };
+
+            const startCamera = async () => {
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ 
+                        video: { facingMode: 'environment' } 
+                    });
+                    if (videoRef.current) {
+                        videoRef.current.srcObject = stream;
+                        setIsCameraActive(true);
+                    }
+                } catch (error) {
+                    showNotification('Camera access denied');
+                }
+            };
+
+            const capturePhoto = async () => {
+                if (!videoRef.current || !canvasRef.current) return;
+                
+                const canvas = canvasRef.current;
+                const video = videoRef.current;
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(video, 0, 0);
+                
+                const base64Data = canvas.toDataURL('image/jpeg').split(',')[1];
+                await processImage(base64Data);
+                
+                stopCamera();
+            };
+
+            const stopCamera = () => {
+                if (videoRef.current?.srcObject) {
+                    videoRef.current.srcObject.getTracks().forEach(track => track.stop());
+                    setIsCameraActive(false);
+                }
+            };
+
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                
+                if (!formData.category || !formData.paymentMode || !formData.aud) {
+                    showNotification('Please fill in Category, Payment Mode, and Amount');
+                    return;
+                }
+
+                const newExpense = { ...formData, id: Date.now() };
+                
+                if (googleSheetURL && googleSheetURL.trim() !== '') {
+                    try {
+                        showNotification('Saving to Google Sheets...');
+                        
+                        await fetch(googleSheetURL, {
+                            method: 'POST',
+                            mode: 'no-cors',
+                            headers: {
+                                'Content-Type': 'application/json',
+                            },
+                            body: JSON.stringify({
+                                date: formData.date,
+                                category: formData.category,
+                                place: formData.place,
+                                items: formData.items,
+                                aud: formData.aud,
+                                paymentMode: formData.paymentMode,
+                                comments: formData.comments
+                            })
+                        });
+                        
+                        showNotification('✅ Saved to Google Sheets!');
+                    } catch (error) {
+                        console.error('Error saving to Google Sheets:', error);
+                        showNotification('⚠️ Saved locally only');
+                    }
+                } else {
+                    showNotification('⚠️ Google Sheets not configured. Saved locally.');
+                }
+                
+                setExpenses(prev => [newExpense, ...prev]);
+                
+                setFormData({
+                    date: new Date().toISOString().split('T')[0],
+                    category: '',
+                    place: '',
+                    items: '',
+                    aud: '',
+                    paymentMode: '',
+                    comments: ''
+                });
+            };
+
+            const addCategory = () => {
+                if (newCategory.trim() && !categories.includes(newCategory.trim())) {
+                    setCategories(prev => [...prev, newCategory.trim()]);
+                    setNewCategory('');
+                    setShowAddCategory(false);
+                    showNotification('Category added!');
+                }
+            };
+
+            const addPayment = () => {
+                if (newPayment.trim() && !paymentModes.includes(newPayment.trim())) {
+                    setPaymentModes(prev => [...prev, newPayment.trim()]);
+                    setNewPayment('');
+                    setShowAddPayment(false);
+                    showNotification('Payment mode added!');
+                }
+            };
+
+            const exportToCSV = () => {
+                const headers = ['Date', 'Category', 'Place', 'Items', 'AUD', 'Payment Mode', 'Comments'];
+                const csv = [
+                    headers.join(','),
+                    ...expenses.map(exp => 
+                        [exp.date, exp.category, exp.place, exp.items, exp.aud, exp.paymentMode, exp.comments]
+                            .map(v => `"${v}"`)
+                            .join(',')
+                    )
+                ].join('\n');
+                
+                const blob = new Blob([csv], { type: 'text/csv' });
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `expenses_${new Date().toISOString().split('T')[0]}.csv`;
+                a.click();
+                showNotification('CSV exported!');
+            };
+
+            return (
+                <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-4">
+                    <div className="max-w-4xl mx-auto">
+                        <div className="bg-white rounded-2xl shadow-xl p-6 mb-6">
+                            <div className="flex justify-between items-center mb-6">
+                                <h1 className="text-3xl font-bold text-gray-800">💰 Expense Tracker</h1>
+                                <button
+                                    onClick={() => setShowSettings(!showSettings)}
+                                    className="px-4 py-2 bg-gray-200 rounded-lg hover:bg-gray-300 transition"
+                                >
+                                    ⚙️ Settings
+                                </button>
+                            </div>
+                            
+                            {showSettings && (
+                                <div className="mb-6 p-4 bg-yellow-50 rounded-xl border border-yellow-200">
+                                    <h3 className="font-semibold text-gray-800 mb-2">Google Sheets Configuration</h3>
+                                    <p className="text-sm text-gray-600 mb-3">Paste your Google Apps Script Web App URL here:</p>
+                                    <input
+                                        type="text"
+                                        value={googleSheetURL}
+                                        onChange={(e) => setGoogleSheetURL(e.target.value)}
+                                        placeholder="https://script.google.com/macros/s/YOUR_SCRIPT_ID/exec"
+                                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                                    />
+                                    <p className="text-xs text-gray-500 mt-2">Don't have one? Follow the setup instructions I shared earlier!</p>
+                                </div>
+                            )}
+                            
+                            {notification && (
+                                <div className="mb-4 p-3 bg-green-100 text-green-800 rounded-lg">
+                                    {notification}
+                                </div>
+                            )}
+
+                            <div className="mb-6 p-4 bg-blue-50 rounded-xl">
+                                <h2 className="text-lg font-semibold text-gray-700 mb-3">📸 Scan Receipt</h2>
+                                <div className="flex flex-wrap gap-3">
+                                    <label className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg cursor-pointer hover:bg-blue-700 transition">
+                                        <lucide.Upload size={20} />
+                                        <span>Upload Image</span>
+                                        <input type="file" accept="image/*" onChange={handleFileUpload} className="hidden" />
+                                    </label>
+                                    
+                                    {!isCameraActive ? (
+                                        <button
+                                            onClick={startCamera}
+                                            className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition"
+                                        >
+                                            <lucide.Camera size={20} />
+                                            <span>Capture Photo</span>
+                                        </button>
+                                    ) : (
+                                        <>
+                                            <button
+                                                onClick={capturePhoto}
+                                                className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition"
+                                            >
+                                                <lucide.Camera size={20} />
+                                                <span>Take Picture</span>
+                                            </button>
+                                            <button
+                                                onClick={stopCamera}
+                                                className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition"
+                                            >
+                                                <lucide.X size={20} />
+                                                <span>Cancel</span>
+                                            </button>
+                                        </>
+                                    )}
+                                </div>
+                                
+                                {isCameraActive && (
+                                    <video ref={videoRef} autoPlay playsInline className="mt-4 w-full rounded-lg" />
+                                )}
+                                <canvas ref={canvasRef} className="hidden" />
+                                
+                                {isProcessing && (
+                                    <div className="mt-3 text-blue-700 font-medium">Processing image...</div>
+                                )}
+                            </div>
+
+                            <div className="space-y-4">
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">Date *</label>
+                                        <input
+                                            type="date"
+                                            name="date"
+                                            value={formData.date}
+                                            onChange={handleInputChange}
+                                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                                        />
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">Category *</label>
+                                        <div className="flex gap-2">
+                                            <select
+                                                name="category"
+                                                value={formData.category}
+                                                onChange={handleInputChange}
+                                                className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                                            >
+                                                <option value="">Select category</option>
+                                                {categories.map(cat => (
+                                                    <option key={cat} value={cat}>{cat}</option>
+                                                ))}
+                                            </select>
+                                            <button
+                                                type="button"
+                                                onClick={() => setShowAddCategory(!showAddCategory)}
+                                                className="px-3 py-2 bg-gray-200 rounded-lg hover:bg-gray-300"
+                                            >
+                                                <lucide.Plus size={20} />
+                                            </button>
+                                        </div>
+                                        {showAddCategory && (
+                                            <div className="flex gap-2 mt-2">
+                                                <input
+                                                    type="text"
+                                                    value={newCategory}
+                                                    onChange={(e) => setNewCategory(e.target.value)}
+                                                    placeholder="New category"
+                                                    className="flex-1 px-3 py-1 border rounded-lg text-sm"
+                                                />
+                                                <button type="button" onClick={addCategory} className="px-3 py-1 bg-blue-600 text-white rounded-lg text-sm">Add</button>
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">Place</label>
+                                        <input
+                                            type="text"
+                                            name="place"
+                                            value={formData.place}
+                                            onChange={handleInputChange}
+                                            placeholder="e.g., North Sydney"
+                                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                                        />
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">Items</label>
+                                        <input
+                                            type="text"
+                                            name="items"
+                                            value={formData.items}
+                                            onChange={handleInputChange}
+                                            placeholder="e.g., Ofc travel"
+                                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                                        />
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">Amount (AUD) *</label>
+                                        <input
+                                            type="number"
+                                            name="aud"
+                                            value={formData.aud}
+                                            onChange={handleInputChange}
+                                            placeholder="0.00"
+                                            step="0.01"
+                                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                                        />
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">Payment Mode *</label>
+                                        <div className="flex gap-2">
+                                            <select
+                                                name="paymentMode"
+                                                value={formData.paymentMode}
+                                                onChange={handleInputChange}
+                                                className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                                            >
+                                                <option value="">Select payment mode</option>
+                                                {paymentModes.map(mode => (
+                                                    <option key={mode} value={mode}>{mode}</option>
+                                                ))}
+                                            </select>
+                                            <button
+                                                type="button"
+                                                onClick={() => setShowAddPayment(!showAddPayment)}
+                                                className="px-3 py-2 bg-gray-200 rounded-lg hover:bg-gray-300"
+                                            >
+                                                <lucide.Plus size={20} />
+                                            </button>
+                                        </div>
+                                        {showAddPayment && (
+                                            <div className="flex gap-2 mt-2">
+                                                <input
+                                                    type="text"
+                                                    value={newPayment}
+                                                    onChange={(e) => setNewPayment(e.target.value)}
+                                                    placeholder="New payment mode"
+                                                    className="flex-1 px-3 py-1 border rounded-lg text-sm"
+                                                />
+                                                <button type="button" onClick={addPayment} className="px-3 py-1 bg-blue-600 text-white rounded-lg text-sm">Add</button>
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">Comments</label>
+                                    <input
+                                        type="text"
+                                        name="comments"
+                                        value={formData.comments}
+                                        onChange={handleInputChange}
+                                        placeholder="Additional notes"
+                                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                                    />
+                                </div>
+
+                                <button
+                                    onClick={handleSubmit}
+                                    className="w-full flex items-center justify-center gap-2 px-6 py-3 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition font-semibold"
+                                >
+                                    <lucide.Save size={20} />
+                                    Save Expense
+                                </button>
+                            </div>
+                        </div>
+
+                        {expenses.length > 0 && (
+                            <div className="bg-white rounded-2xl shadow-xl p-6">
+                                <div className="flex justify-between items-center mb-4">
+                                    <h2 className="text-2xl font-bold text-gray-800">Recent Expenses</h2>
+                                    <button
+                                        onClick={exportToCSV}
+                                        className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition"
+                                    >
+                                        Export CSV
+                                    </button>
+                                </div>
+                                <div className="overflow-x-auto">
+                                    <table className="w-full">
+                                        <thead className="bg-gray-50">
+                                            <tr>
+                                                <th className="px-4 py-2 text-left text-sm font-semibold text-gray-700">Date</th>
+                                                <th className="px-4 py-2 text-left text-sm font-semibold text-gray-700">Category</th>
+                                                <th className="px-4 py-2 text-left text-sm font-semibold text-gray-700">Place</th>
+                                                <th className="px-4 py-2 text-left text-sm font-semibold text-gray-700">Items</th>
+                                                <th className="px-4 py-2 text-left text-sm font-semibold text-gray-700">AUD</th>
+                                                <th className="px-4 py-2 text-left text-sm font-semibold text-gray-700">Payment</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {expenses.map(exp => (
+                                                <tr key={exp.id} className="border-t hover:bg-gray-50">
+                                                    <td className="px-4 py-2 text-sm">{exp.date}</td>
+                                                    <td className="px-4 py-2 text-sm">{exp.category}</td>
+                                                    <td className="px-4 py-2 text-sm">{exp.place}</td>
+                                                    <td className="px-4 py-2 text-sm">{exp.items}</td>
+                                                    <td className="px-4 py-2 text-sm font-semibold">${exp.aud}</td>
+                                                    <td className="px-4 py-2 text-sm">{exp.paymentMode}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        }
+
+        ReactDOM.render(<ExpenseTracker />, document.getElementById('root'));
+    </script>
+</body>
+</html>
